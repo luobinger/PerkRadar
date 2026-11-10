@@ -1,0 +1,64 @@
+name: Snapshot to Pages
+
+# 把 PerkRadar 的每轮抓取结果导出成静态快照，发布到 GitHub Pages。
+# 不需要常开的机器：每次运行都是全新的临时库，抓完即弃，
+# 只把 latest.json / previous.json / index.html 推到 gh-pages 分支。
+# 与库自带的 live-sources.yml（每日探测、只传 artifact）并存，不改它。
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub Actions cron 用 UTC；每 2 小时跑一次，与库内 2 小时抓取节律一致
+    - cron: '23 */2 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+
+      - name: Fetch sources into a throwaway database
+        env:
+          # npm run report 会调用 runRefresh 写库，绝不能指向仓库的 ./data，
+          # 按库自带工作流的做法写进临时目录
+          DATA_DIR: ${{ runner.temp }}/perkradar-db
+          DISABLE_SCHEDULER: '1'
+          # 可选：仓库 Secrets 里配 JINA_API_KEY 可稳住 LINUX DO 那路；
+          # 不配也能跑，只是那路稳定性未保证
+          JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
+        run: npm run report
+
+      - name: Export snapshot JSON
+        env:
+          DATA_DIR: ${{ runner.temp }}/perkradar-db
+          DEALS_SNAPSHOT_DIR: ${{ runner.temp }}/perkradar-snapshots
+        # package.json 里没有 snapshot 脚本，直接调 tsx 跑库里的脚本
+        run: node --import tsx scripts/write-snapshot.ts
+
+      - name: Prepare Pages content
+        run: |
+          mkdir -p public
+          cp "${{ runner.temp }}/perkradar-snapshots/latest.json" public/latest.json
+          # 取上一轮已发布的 latest.json，页面用它算“本轮新增”。
+          # 第一轮还没有 gh-pages 分支时，给一个空 items，页面就不标新增。
+          if git fetch origin gh-pages --depth 1 2>/dev/null && git show origin/gh-pages:latest.json > public/previous.json 2>/dev/null; then
+            echo "previous snapshot found"
+          else
+            echo '{"items":[]}' > public/previous.json
+          fi
+          cp snapshot-viewer/index.html public/index.html
+
+      - name: Publish to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
