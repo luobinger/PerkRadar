@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PerkRadar 快照</title>
+<style>
+  body { font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 16px; line-height: 1.6; color: #222; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .meta { color: #666; font-size: 13px; margin-bottom: 12px; }
+  .meta .bad { color: #b3261e; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .controls input, .controls select { font: inherit; padding: 6px 8px; border: 1px solid #ccc; border-radius: 6px; }
+  .controls input { flex: 1; min-width: 180px; }
+  .item { border-top: 1px solid #e5e5e5; padding: 10px 0; }
+  .item a { color: #1a5fb4; text-decoration: none; font-weight: 600; }
+  .item a:visited { color: #6a4fa3; }
+  .tags { font-size: 12px; color: #666; margin-top: 2px; }
+  .badge { display: inline-block; font-size: 11px; color: #fff; background: #2e7d32; border-radius: 4px; padding: 0 5px; margin-left: 6px; vertical-align: 1px; }
+  .badge.exp { background: #b3261e; }
+  .fav { cursor: pointer; border: 1px solid #ccc; background: #fff; border-radius: 6px; padding: 2px 8px; font-size: 12px; margin-left: 8px; }
+  .fav.on { background: #fff3cd; border-color: #d9a400; }
+  .empty { color: #666; padding: 24px 0; }
+</style>
+</head>
+<body>
+<h1>PerkRadar 快照</h1>
+<div class="meta" id="meta">加载中…</div>
+<div class="controls">
+  <input id="q" type="search" placeholder="搜标题…" autocomplete="off">
+  <select id="source"><option value="">全部来源</option></select>
+  <select id="cat"><option value="">全部分类</option></select>
+  <label><input id="onlyNew" type="checkbox"> 只看本轮新增</label>
+  <label><input id="onlyFav" type="checkbox"> 只看收藏</label>
+</div>
+<div id="list"></div>
+<script>
+const KEY = "perkradar-pages-personal-v1";
+const personal = JSON.parse(localStorage.getItem(KEY) || '{"favorites":[],"claimed":[]}');
+const save = () => localStorage.setItem(KEY, JSON.stringify(personal));
+
+let data = null, prevUrls = new Set();
+async function loadJSON(name) {
+  const r = await fetch(name, { cache: "no-store" });
+  if (!r.ok) throw new Error(name + " " + r.status);
+  return r.json();
+}
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+async function init() {
+  try {
+    data = await loadJSON("latest.json");
+    const prev = await loadJSON("previous.json").catch(() => ({ items: [] }));
+    prevUrls = new Set((prev.items || []).map(i => i.url));
+  } catch (e) {
+    document.getElementById("meta").textContent = "快照还没生成：先在仓库 Actions 里手动跑一次 Snapshot to Pages。";
+    return;
+  }
+  const items = data.items || [];
+  const isNew = it => !prevUrls.has(it.url);
+  const fresh = data.freshUntil ? new Date(data.freshUntil) : null;
+  const stale = fresh && Date.now() > fresh.getTime();
+  document.getElementById("meta").innerHTML =
+    `抓取于 ${esc(data.fetchedAtBeijing || data.fetchedAt || "")} · 在架 ${data.activeCount} 条` +
+    ` · 来源 ${data.sourceHealth.ok}/${data.sourceHealth.total} 正常` +
+    (stale ? ` · <span class="bad">已超过 2 小时新鲜期，条目只当历史快照看</span>` : "") +
+    ((data.failures || []).length ? ` · <span class="bad">失败：${data.failures.map(f => esc(f.sourceName)).join("、")}</span>` : "");
+
+  const srcSel = document.getElementById("source"), catSel = document.getElementById("cat");
+  [...new Set(items.map(i => i.sourceName))].forEach(n => srcSel.add(new Option(n, n)));
+  [...new Set(items.map(i => i.category))].forEach(n => catSel.add(new Option(n, n)));
+
+  function render() {
+    const q = document.getElementById("q").value.trim();
+    const src = srcSel.value, cat = catSel.value;
+    const onlyNew = document.getElementById("onlyNew").checked;
+    const onlyFav = document.getElementById("onlyFav").checked;
+    const shown = items.filter(it =>
+      (!q || it.title.includes(q)) &&
+      (!src || it.sourceName === src) &&
+      (!cat || it.category === cat) &&
+      (!onlyNew || isNew(it)) &&
+      (!onlyFav || personal.favorites.includes(it.url)));
+    const list = document.getElementById("list");
+    if (!shown.length) { list.innerHTML = '<div class="empty">没有符合条件的条目。</div>'; return; }
+    list.innerHTML = shown.map(it => {
+      const fav = personal.favorites.includes(it.url);
+      const claimed = personal.claimed.includes(it.url);
+      return `<div class="item"><a href="${esc(it.url)}" target="_blank" rel="noopener">${esc(it.title)}</a>` +
+        (isNew(it) ? '<span class="badge">新增</span>' : "") +
+        (it.expiresAtBeijing ? '<span class="badge exp">截止 ' + esc(it.expiresAtBeijing) + '</span>' : "") +
+        `<button class="fav${fav ? " on" : ""}" data-url="${esc(it.url)}">${fav ? "★ 已收藏" : "☆ 收藏"}</button>` +
+        `<button class="fav${claimed ? " on" : ""}" data-claim="${esc(it.url)}">${claimed ? "✓ 已领" : "标记已领"}</button>` +
+        `<div class="tags">${esc(it.sourceName)} · ${esc(it.category)}${it.publishedAtBeijing ? " · " + esc(it.publishedAtBeijing) : ""}</div></div>`;
+    }).join("");
+  }
+  document.querySelectorAll("#q, #source, #cat, #onlyNew, #onlyFav").forEach(el =>
+    el.addEventListener("input", render));
+  document.getElementById("list").addEventListener("click", e => {
+    const b = e.target.closest("button[data-url], button[data-claim]");
+    if (!b) return;
+    const url = b.dataset.url || b.dataset.claim;
+    const arr = b.dataset.url ? personal.favorites : personal.claimed;
+    const i = arr.indexOf(url);
+    if (i >= 0) arr.splice(i, 1); else arr.push(url);
+    save(); render();
+  });
+  render();
+}
+init();
+</script>
+</body>
+</html>
